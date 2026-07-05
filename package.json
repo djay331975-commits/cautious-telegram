@@ -1,0 +1,26 @@
+{
+  "name": "autostream-commerce",
+  "version": "1.0.0",
+  "description": "",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "format": "prettier --write \"**/*.{ts,tsx,md}\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "npm@10.2.4",
+  "type": "commonjs",
+  "devDependencies": {
+    "prettier": "^3.8.4",
+    "turbo": "^2.9.17",
+    "typescript": "^6.0.3"
+  }
+}

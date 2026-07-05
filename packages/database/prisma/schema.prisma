@@ -1,0 +1,256 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  stores    Store[]
+}
+
+model Store {
+  id          String      @id @default(uuid())
+  name        String
+  platform    String
+  accessToken String
+  userId      String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  Order       Order[]
+  products    Product[]
+  user        User        @relation(fields: [userId], references: [id])
+  storeNiches StoreNiche[]
+}
+
+model Product {
+  id                 String   @id @default(uuid())
+  externalId         String
+  title              String
+  description        String?
+  price              Float
+  sku                String?
+  listingTitle       String?
+  listingDescription String?
+  bulletPoints       String?
+  searchTerms        String?
+  listingImagePrompt String?
+  listingImageUrls   String?
+  status             String   @default("DRAFT")
+  storeId            String
+  nicheId            String?  @default(uuid())
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  store              Store    @relation(fields: [storeId], references: [id])
+  niche              Niche?   @relation(fields: [nicheId], references: [id])
+}
+
+model Niche {
+  id                 String            @id @default(uuid())
+  name               String            @unique
+  category           String?
+  growthScore        Float?
+  profitabilityIndex Float?
+  competitionLevel   String?
+  lastUpdated        DateTime          @default(now())
+  products           TrendingProduct[]
+  config             NicheConfig?
+  productList        Product[]
+  storeNiches        StoreNiche[]
+}
+
+/// Per-niche configuration for fulfillment, sourcing, and rules
+model NicheConfig {
+  id                    String   @id @default(uuid())
+  nicheId               String   @unique
+  niche                 Niche    @relation(fields: [nicheId], references: [id])
+  /// Default fulfillment partner (CJ, Printful, Manual)
+  fulfillmentPartner    String   @default("CJ")
+  /// Default shipping origin region (US, EU, CN)
+  shippingOrigin        String   @default("US")
+  /// Default markup percentage (e.g., 30 = 30% over cost)
+  defaultMarkupPercent  Float    @default(30.0)
+  /// Preferred warehouse region
+  preferredWarehouse    String   @default("US")
+  /// Max shipping days before flagging
+  maxShippingDays       Int      @default(15)
+  /// CJ Dropshipping category ID for product discovery
+  cjCategoryId          String?
+  /// Custom prompt prefix for AI listing generation
+  listingPromptPrefix   String?
+  /// Default listing platform target
+  listingPlatform       String   @default("Shopify")
+  /// Active status
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+/// Many-to-many relationship between stores and niches
+model StoreNiche {
+  id        String   @id @default(uuid())
+  storeId   String
+  nicheId   String
+  createdAt DateTime @default(now())
+  store     Store    @relation(fields: [storeId], references: [id])
+  niche     Niche    @relation(fields: [nicheId], references: [id])
+
+  @@unique([storeId, nicheId])
+}
+
+model TrendingProduct {
+  id                    String              @id @default(uuid())
+  title                 String
+  nicheId               String
+  status                String              @default("PENDING")
+  discoveryPlatform     String
+  externalUrl           String?
+  estimatedMonthlySales Int?
+  currentMarketPrice    Float?
+  signalStrength        Float?
+  keywords              String?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  competitors           CompetitorListing[]
+  sourceProposals       SourceProposal[]
+  niche                 Niche               @relation(fields: [nicheId], references: [id])
+}
+
+model CompetitorListing {
+  id             String          @id @default(uuid())
+  productId      String
+  platform       String
+  price          Float
+  rating         Float?
+  reviewCount    Int?
+  url            String
+  lastObservedAt DateTime        @default(now())
+  product        TrendingProduct @relation(fields: [productId], references: [id])
+}
+
+model SourceProposal {
+  id                String          @id @default(uuid())
+  productId         String
+  supplierName      String
+  sourcingUrl       String
+  unitCost          Float
+  shippingCost      Float?
+  estimatedDelivery Int?
+  isReliable        Boolean         @default(true)
+  product           TrendingProduct @relation(fields: [productId], references: [id])
+}
+
+model TrendSignal {
+  id             String   @id @default(uuid())
+  source         String
+  keyword        String
+  signalStrength Float?
+  observedAt     DateTime @default(now())
+}
+
+model Order {
+  id              String      @id
+  externalOrderId String
+  storeId         String
+  customerEmail   String
+  customerName    String
+  shippingAddress String?
+  status          String      @default("PENDING")
+  totalPrice      Float
+  cjOrderId       String?
+  trackingNumber  String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime
+  store           Store       @relation(fields: [storeId], references: [id])
+  OrderItem       OrderItem[]
+}
+
+model OrderItem {
+  id        String @id
+  orderId   String
+  productId String
+  sku       String
+  quantity  Int
+  price     Float
+  order     Order  @relation(fields: [orderId], references: [id])
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model agents {
+  id           String? @id
+  role         String
+  capabilities String
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model config {
+  key   String? @id
+  value String
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model inbox {
+  id         String? @id
+  from_agent String
+  to_agent   String
+  body       String
+  created_at String  @default("datetime('now')")
+  read_at    String?
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model tasks {
+  id          String? @id
+  title       String
+  description String
+  status      String  @default("backlog")
+  created_by  String
+  assigned_to String?
+  result      String?
+  created_at  String  @default("datetime('now')")
+  updated_at  String  @default("datetime('now')")
+
+  @@ignore
+}
+
+model turso_cdc {
+  change_id     Int              @id @default(autoincrement())
+  change_time   Int?
+  change_txn_id Int?
+  change_type   Int?
+  table_name    String?
+  id            Unsupported("")?
+  before        Bytes?
+  after         Bytes?
+  updates       Bytes?
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model turso_cdc_version {
+  table_name String? @id
+  version    String
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model turso_sync_last_change_id {
+  client_id String? @id
+  pull_gen  Int?
+  change_id Int?
+
+  @@ignore
+}

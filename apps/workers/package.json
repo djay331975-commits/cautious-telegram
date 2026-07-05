@@ -1,0 +1,26 @@
+{
+  "name": "workers",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup src/index.ts --format cjs,esm --dts --tsconfig tsconfig.json",
+    "lint": "eslint src/**/*.ts"
+  },
+  "dependencies": {
+    "@autostream/database": "*",
+    "@autostream/integration-sdk": "*",
+    "@prisma/client": "^5.22.0",
+    "bullmq": "^5.4.2",
+    "dotenv": "^16.4.5",
+    "ioredis": "^5.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "ioredis-mock": "^8.13.1",
+    "tsup": "^8.0.2",
+    "tsx": "^4.7.1",
+    "typescript": "^5.4.2"
+  }
+}
