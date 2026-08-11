@@ -560,18 +560,38 @@ async function cjAuth(): Promise<string> {
   return authData.data.accessToken;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// CJ API QPS limit is 1 request/second (429: "QPS limit is 1 time/1second").
+// Pace calls >=1.3s apart and retry transient 429s with backoff.
+async function cjCall(token: string, path: string, init?: RequestInit, attempts = 4) {
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await sleep(1500 * Math.pow(2, i - 1)); // 1.5s, 3s, 6s
+    const resp = await fetch(`${CJ_API_BASE}${path}`, {
+      ...init,
+      headers: { ...(init?.headers || {}), 'CJ-Access-Token': token },
+    });
+    if (resp.status === 429) {
+      console.warn(`⚠️ CJ rate limited (429) on ${path}, retry ${i + 1}/${attempts}`);
+      continue;
+    }
+    const data: any = await resp.json();
+    if (data?.code === 429 || data?.code === '429') continue;
+    return data;
+  }
+  return { code: 429, message: 'Too Many Requests after retries', data: null };
+}
+
 async function cjGet(token: string, path: string) {
-  const resp = await fetch(`${CJ_API_BASE}${path}`, { headers: { 'CJ-Access-Token': token } });
-  return resp.json();
+  return cjCall(token, path);
 }
 
 async function cjPost(token: string, path: string, payload: any) {
-  const resp = await fetch(`${CJ_API_BASE}${path}`, {
+  return cjCall(token, path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'CJ-Access-Token': token },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  return resp.json();
 }
 
 fastify.post('/api/webhooks/shopify/orders', async (request: any, reply: any) => {
@@ -601,12 +621,14 @@ fastify.post('/api/webhooks/shopify/orders', async (request: any, reply: any) =>
     const token = await cjAuth();
 
     // Step 1: Resolve each SKU → CJ variant id (vid) via /product/query
+    // CJ QPS limit is 1/s — pace the calls and skip items that fail to resolve.
     const cjProducts: { vid: string; quantity: number }[] = [];
-    for (const item of items) {
+    for (const [idx, item] of items.entries()) {
+      if (idx > 0) await sleep(1300);
       const query: any = await cjGet(token, `/api2.0/v1/product/query?productSku=${encodeURIComponent(item.sku)}`);
       const variants = query?.data?.variants || [];
       if (!variants.length) {
-        console.warn(`⚠️ No CJ variant found for SKU ${item.sku}:`, query?.message);
+        console.warn(`⚠️ No CJ variant found for SKU ${item.sku}:`, query?.message || query);
         continue;
       }
       cjProducts.push({ vid: variants[0].vid, quantity: item.quantity });
@@ -615,8 +637,8 @@ fastify.post('/api/webhooks/shopify/orders', async (request: any, reply: any) =>
       return reply.code(200).send({ status: 'no_cj_variants' });
     }
 
-    // Step 2: Get a valid logisticName for the destination
-    let logisticName = 'CJ Standard Shipping';
+    // Step 2: Get a valid logisticName for the destination (retry handled by cjPost)
+    let logisticName = '';
     try {
       const freight: any = await cjPost(token, '/api2.0/v1/logistic/freightCalculate', {
         startCountryCode: 'CN',
@@ -625,9 +647,16 @@ fastify.post('/api/webhooks/shopify/orders', async (request: any, reply: any) =>
       });
       if (freight?.data?.length) {
         logisticName = freight.data[0].logisticName;
+      } else {
+        console.warn('⚠️ Freight calc returned no logistic:', freight?.message || JSON.stringify(freight));
       }
     } catch (e: any) {
-      console.warn('⚠️ Freight calc failed, using default logistic:', e.message);
+      console.warn('⚠️ Freight calc failed:', e.message);
+    }
+
+    if (!logisticName) {
+      // Never place an order with a made-up logistic name — CJ rejects it (1605001).
+      return reply.code(200).send({ status: 'freight_unavailable', orderNumber: `ASC-${order.id || Date.now()}` });
     }
 
     // Step 3: Place the order (sandbox=0 for real orders; set 1 to test without charges)
