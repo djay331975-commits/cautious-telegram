@@ -670,7 +670,10 @@ fastify.post('/api/webhooks/shopify/orders', async (request: any, reply: any) =>
       shippingCity: shippingAddr.city || '',
       shippingAddress: shippingAddr.address1 || '',
       shippingCustomerName: customerName,
-      shippingPhone: shippingAddr.phone || order.customer?.phone || '',
+      // CJ requires a non-empty shipping phone (1600300). Fall back through
+      // all available sources; if none exist, use CJ_FALLBACK_PHONE (placeholder)
+      // so real orders don't get silently dropped by CJ.
+      shippingPhone: shippingAddr.phone || order.phone || order.billing_address?.phone || order.customer?.phone || process.env.CJ_FALLBACK_PHONE || '',
       fromCountryCode: 'CN',
       logisticName,
       isSandbox: process.env.CJ_SANDBOX === '1' ? 1 : 0,
@@ -680,7 +683,12 @@ fastify.post('/api/webhooks/shopify/orders', async (request: any, reply: any) =>
     console.log('📤 Forwarding to CJ:', JSON.stringify(cjOrderPayload, null, 2));
     const cjData: any = await cjPost(token, '/api2.0/v1/shopping/order/createOrder', cjOrderPayload);
     console.log('✅ CJ order response:', cjData);
-
+    if (cjData?.code !== 200) {
+      // CJ rejected — return non-2xx so Shopify retries the webhook instead of
+      // marking it delivered. Prevents silent order loss.
+      console.warn('⚠️ CJ rejected order; Shopify will retry:', cjData?.message || JSON.stringify(cjData));
+      return reply.code(502).send({ status: 'cj_rejected', orderNumber, cj_response: cjData });
+    }
     return reply.code(200).send({ status: 'forwarded', orderNumber, cj_response: cjData });
   } catch (err: any) {
     console.error('❌ Webhook error:', err.message);
