@@ -11,6 +11,7 @@ export interface CJAccessTokenResponse {
 }
 
 export interface CJOrderPayload {
+  fromCountryCode: string;
   recipientName: string;
   address: string;
   city: string;
@@ -40,17 +41,21 @@ export class CJAdapter {
 
   async authenticate(email: string, apiKey: string): Promise<string> {
     try {
-      const response = await this.client.post<CJAccessTokenResponse>('/api2.0/v1/authentication/getAccessToken', {
-        email,
-        apiKey,
-      });
+      // Determine auth payload format:
+      // If apiKey contains '@api@', it's the combined format (apiKey mode) — send only apiKey field
+      // Otherwise, send both email and apiKey (legacy format)
+      const payload: Record<string, string> = apiKey.includes('@api@')
+        ? { apiKey }
+        : { email, apiKey };
 
-      if (response.data.code === 200 && response.data.result) {
+      const response = await this.client.post<CJAccessTokenResponse>('/api2.0/v1/authentication/getAccessToken', payload);
+
+      if (response.data && response.data.code === 200 && response.data.result) {
         this.accessToken = response.data.data.accessToken;
         this.client.defaults.headers.common['CJ-Access-Token'] = this.accessToken;
         return this.accessToken;
       } else {
-        throw new Error(`CJ Authentication failed: ${response.data.message}`);
+        throw new Error(`CJ Authentication failed: ${response.data?.message || 'Unknown error'}`);
       }
     } catch (error: any) {
       console.error('CJ Auth Error:', error.response?.data || error.message);
@@ -69,7 +74,7 @@ export class CJAdapter {
   }
 
   async createOrder(orderData: CJOrderPayload) {
-    const response = await this.client.post('/api2.0/v1/order/create', orderData);
+    const response = await this.client.post('/api2.0/v1/shopping/order/createOrder', orderData);
     return response.data;
   }
 

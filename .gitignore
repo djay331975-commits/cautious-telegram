@@ -5,3 +5,8 @@ dist
 out
 .env
 *.log
+
+# Local database artifacts — never commit
+packages/database/prisma/dev.db
+*.db
+*.db-journal
