@@ -49,6 +49,81 @@ fastify.register(fastifyStatic, {
   prefix: '/',
 });
 
+// ===== Shopify OAuth Callback Route =====
+// Store the latest OAuth code in memory (volatile — for owner-led flow only)
+let latestOauthCode: string | null = null;
+
+fastify.get('/shopify/callback', async (request: any, reply: any) => {
+  const code = request.query?.code;
+  if (code) {
+    latestOauthCode = code;
+    console.log('✅ Shopify OAuth code received:', code);
+    
+    // Automatically exchange the code for an access token
+    const clientId = process.env.SHOPIFY_API_KEY || '0b99067d252c789f111c527e27d4abab';
+    const clientSecret = process.env.SHOPIFY_API_SECRET || '';
+    
+    try {
+      const response = await fetch(`https://wnun0z-h9.myshopify.com/admin/oauth/access_token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: clientId,
+          client_secret: clientSecret,
+          code: code
+        })
+      });
+      const data: any = await response.json();
+      
+      if (data.access_token) {
+        console.log('🎉 SHOPIFY ACCESS TOKEN:', data.access_token);
+        console.log('Scopes:', data.scope);
+        // Store in process environment for use by the app
+        process.env.SHOPIFY_ACCESS_TOKEN = data.access_token;
+        
+        reply.type('text/html').send(`
+          <html><body style="font-family:sans-serif;padding:40px">
+            <h1>✅ Shopify Connected!</h1>
+            <p>Access token received. You can close this tab.</p>
+            <pre style="background:#f5f5f5;padding:10px;border-radius:5px">${data.access_token.substring(0, 20)}...</pre>
+          </body></html>
+        `);
+      } else {
+        console.error('Token exchange failed:', data);
+        reply.type('text/html').send(`
+          <html><body style="font-family:sans-serif;padding:40px">
+            <h1>❌ Token Exchange Failed</h1>
+            <pre>${JSON.stringify(data, null, 2)}</pre>
+            <p>Error: ${data.error_description || data.message || 'Unknown error'}</p>
+          </body></html>
+        `);
+      }
+    } catch (err: any) {
+      console.error('Token exchange error:', err.message);
+      reply.code(500).send({ error: err.message });
+    }
+  } else {
+    const error = request.query?.error_description || request.query?.error || 'No code received';
+    console.error('❌ OAuth callback error:', error);
+    reply.type('text/html').send(`
+      <html><body style="font-family:sans-serif;padding:40px">
+        <h1>❌ OAuth Error</h1>
+        <p>${error}</p>
+      </body></html>
+    `);
+  }
+});
+
+// GET /api/shopify/token - Report the current token status
+fastify.get('/api/shopify/token', async () => {
+  const token = process.env.SHOPIFY_ACCESS_TOKEN;
+  return {
+    connected: !!token,
+    tokenPrefix: token ? token.substring(0, 10) + '...' : null,
+    message: token ? 'Token available' : 'No token yet — visit the authorize URL to connect'
+  };
+});
+
 // Fallback to index.html for SPA routing
 fastify.setNotFoundHandler((request, reply) => {
   if (request.url.startsWith('/api')) {
@@ -463,6 +538,125 @@ fastify.delete<{ Params: { storeId: string, nicheId: string } }>('/api/stores/:s
     where: { storeId, nicheId }
   });
   return { success: true };
+});
+
+// ===== Shopify Webhook: orders/create → CJ Fulfillment =====
+// CJ v2 API flow (verified 2026-08-11 from official docs):
+//   1. GET  /api2.0/v1/product/query?productSku=<sku>  → variants[0].vid
+//   2. POST /api2.0/v1/logistic/freightCalculate        → logisticName
+//   3. POST /api2.0/v1/shopping/order/createOrder       → place order
+const CJ_API_BASE = 'https://developers.cjdropshipping.com';
+const CJ_API_KEY = process.env.CJ_API_KEY || '';
+
+async function cjAuth(): Promise<string> {
+  if (!CJ_API_KEY) throw new Error('CJ_API_KEY env var is required for CJ fulfillment');
+  const authResp = await fetch(`${CJ_API_BASE}/api2.0/v1/authentication/getAccessToken`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey: CJ_API_KEY }),
+  });
+  const authData: any = await authResp.json();
+  if (authData.code !== 200) throw new Error(`CJ auth failed: ${authData.message}`);
+  return authData.data.accessToken;
+}
+
+async function cjGet(token: string, path: string) {
+  const resp = await fetch(`${CJ_API_BASE}${path}`, { headers: { 'CJ-Access-Token': token } });
+  return resp.json();
+}
+
+async function cjPost(token: string, path: string, payload: any) {
+  const resp = await fetch(`${CJ_API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'CJ-Access-Token': token },
+    body: JSON.stringify(payload),
+  });
+  return resp.json();
+}
+
+fastify.post('/api/webhooks/shopify/orders', async (request: any, reply: any) => {
+  try {
+    const order = request.body;
+    console.log('📦 Order webhook received:', order?.id || 'unknown');
+
+    // Extract line items with SKUs (Shopify SKUs == CJ product SKUs)
+    const lineItems = order?.line_items || [];
+    if (!lineItems.length) {
+      return reply.code(200).send({ status: 'no_items' });
+    }
+
+    const items = lineItems
+      .map((item: any) => ({ sku: item.sku || '', quantity: item.quantity || 1 }))
+      .filter((p: any) => p.sku);
+
+    if (!items.length) {
+      return reply.code(200).send({ status: 'no_sku_products' });
+    }
+
+    const shippingAddr = order.shipping_address || order.billing_address || {};
+    const customerName = shippingAddr.name
+      || `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`.trim()
+      || 'Customer';
+
+    const token = await cjAuth();
+
+    // Step 1: Resolve each SKU → CJ variant id (vid) via /product/query
+    const cjProducts: { vid: string; quantity: number }[] = [];
+    for (const item of items) {
+      const query: any = await cjGet(token, `/api2.0/v1/product/query?productSku=${encodeURIComponent(item.sku)}`);
+      const variants = query?.data?.variants || [];
+      if (!variants.length) {
+        console.warn(`⚠️ No CJ variant found for SKU ${item.sku}:`, query?.message);
+        continue;
+      }
+      cjProducts.push({ vid: variants[0].vid, quantity: item.quantity });
+    }
+    if (!cjProducts.length) {
+      return reply.code(200).send({ status: 'no_cj_variants' });
+    }
+
+    // Step 2: Get a valid logisticName for the destination
+    let logisticName = 'CJ Standard Shipping';
+    try {
+      const freight: any = await cjPost(token, '/api2.0/v1/logistic/freightCalculate', {
+        startCountryCode: 'CN',
+        endCountryCode: shippingAddr.country_code || 'US',
+        products: cjProducts,
+      });
+      if (freight?.data?.length) {
+        logisticName = freight.data[0].logisticName;
+      }
+    } catch (e: any) {
+      console.warn('⚠️ Freight calc failed, using default logistic:', e.message);
+    }
+
+    // Step 3: Place the order (sandbox=0 for real orders; set 1 to test without charges)
+    const orderNumber = `ASC-${order.id || Date.now()}`;
+    const cjOrderPayload = {
+      orderNumber,
+      shippingZip: shippingAddr.zip || '',
+      shippingCountryCode: shippingAddr.country_code || 'US',
+      shippingCountry: shippingAddr.country || shippingAddr.country_code || 'United States',
+      shippingProvince: shippingAddr.province || shippingAddr.state || '',
+      shippingCity: shippingAddr.city || '',
+      shippingAddress: shippingAddr.address1 || '',
+      shippingCustomerName: customerName,
+      shippingPhone: shippingAddr.phone || order.customer?.phone || '',
+      fromCountryCode: 'CN',
+      logisticName,
+      isSandbox: process.env.CJ_SANDBOX === '1' ? 1 : 0,
+      products: cjProducts,
+    };
+
+    console.log('📤 Forwarding to CJ:', JSON.stringify(cjOrderPayload, null, 2));
+    const cjData: any = await cjPost(token, '/api2.0/v1/shopping/order/createOrder', cjOrderPayload);
+    console.log('✅ CJ order response:', cjData);
+
+    return reply.code(200).send({ status: 'forwarded', orderNumber, cj_response: cjData });
+  } catch (err: any) {
+    console.error('❌ Webhook error:', err.message);
+    return reply.code(500).send({ status: 'error', message: err.message });
+  }
 });
 
 const start = async () => {
