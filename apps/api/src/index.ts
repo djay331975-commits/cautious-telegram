@@ -690,7 +690,7 @@ fastify.post('/api/webhooks/shopify/orders', async (request: any, reply: any) =>
 
 const start = async () => {
   try {
-    await fastify.listen({ port: 3000, host: '0.0.0.0' });
+    await fastify.listen({ port: Number(process.env.API_PORT) || 3001, host: '127.0.0.1' });
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
